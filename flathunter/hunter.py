@@ -1,68 +1,46 @@
+"""Default Flathunter implementation for the command line"""
 import logging
-import requests
-import re
-import urllib
-import datetime
-import time
-from flathunter.sender_telegram import SenderTelegram
+from itertools import chain
+
+from flathunter.config import Config
+from flathunter.filter import Filter
+from flathunter.processor import ProcessorChain
 
 class Hunter:
-    __log__ = logging.getLogger(__name__)
-    GM_MODE_TRANSIT = 'transit'
-    GM_MODE_BICYCLE = 'bicycling'
-    GM_MODE_DRIVING = 'driving'
+    """Hunter class - basic methods for crawling and processing / filtering exposes"""
+    __log__ = logging.getLogger('flathunt')
 
-    def hunt_flats(self, config, searchers, id_watch):
-        sender = SenderTelegram(config)
-        new_links = 0
-        processed = id_watch.get()
+    def __init__(self, config, id_watch):
+        self.config = config
+        if not isinstance(self.config, Config):
+            raise Exception("Invalid config for hunter - should be a 'Config' object")
+        self.id_watch = id_watch
 
-        for url in config.get('urls', list()):
-            self.__log__.debug('Processing URL: ' + url)
+    def crawl_for_exposes(self, max_pages=None):
+        """Trigger a new crawl of the configured URLs"""
+        return chain(*[searcher.crawl(url, max_pages)
+                       for searcher in self.config.searchers()
+                       for url in self.config.get('urls', list())])
 
-            try:
-                for searcher in searchers:
-                    if re.search(searcher.URL_PATTERN, url):
-                        results = searcher.get_results(url)
-                        break
-            except requests.exceptions.ConnectionError:
-                self.__log__.warning("Connection to %s failed. Retrying. " % url.split('/')[2])
-                continue
+    def hunt_flats(self, max_pages=None):
+        """Crawl, process and filter exposes"""
+        filter_set = Filter.builder() \
+                           .read_config(self.config) \
+                           .filter_already_seen(self.id_watch) \
+                           .build()
 
-            # on error, stop execution
-            if not results:
-                break
+        processor_chain = ProcessorChain.builder(self.config) \
+                                        .save_all_exposes(self.id_watch) \
+                                        .apply_filter(filter_set) \
+                                        .resolve_addresses() \
+                                        .calculate_durations() \
+                                        .send_telegram_messages() \
+                                        .build()
 
-            for expose in results:
-                # check if already processed
-                if expose['id'] in processed:
-                    continue
+        result = []
+        # We need to iterate over this list to force the evaluation of the pipeline
+        for expose in processor_chain.process(self.crawl_for_exposes(max_pages)):
+            self.__log__.info('New offer: %s', expose['title'])
+            result.append(expose)
 
-                self.__log__.info('New offer: ' + expose['title'])
-
-                # to reduce traffic, some addresses need to be loaded on demand
-                address = expose['address']
-                if address.startswith('http'):
-                    url = address
-                    for searcher in searchers:
-                        if re.search(searcher.URL_PATTERN, url):
-                            address = searcher.load_address(url)
-                            self.__log__.debug("Loaded address %s for url %s" % (address, url))
-                            break
-
-                # calculdate durations
-                message = config.get('message', "").format(
-                    title=expose['title'],
-                    rooms=expose['rooms'],
-                    size=expose['size'],
-                    price=expose['price'],
-                    url=expose['url']
-                    ).strip()
-
-                # send message to all receivers
-                sender.send_msg(message)
-
-                new_links = new_links + 1
-                id_watch.add(expose['id'])
-        print(str(new_links) + ' new offer found')
-        self.__log__.info(str(new_links) + ' new offer found')
+        return result
