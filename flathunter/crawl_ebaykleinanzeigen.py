@@ -75,7 +75,7 @@ class CrawlEbayKleinanzeigen:
 
     def load_address(self, url):
         # extract address from expose itself
-        exposeHTML = requests.get(url).content
+        exposeHTML = requests.get(url, headers=self.HEADERS).content
         exposeSoup = BeautifulSoup(exposeHTML, 'html.parser')
         try:
             street_raw = exposeSoup.find(id="street-address").text
